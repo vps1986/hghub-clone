@@ -1,0 +1,11 @@
+# 密钥、构建产物、本地配置一律不进仓库
+*.jks
+*.keystore
+local.properties
+.gradle/
+**/build/
+.idea/
+*.iml
+__pycache__/
+*.pyc
+android/HGhub-*.apk*

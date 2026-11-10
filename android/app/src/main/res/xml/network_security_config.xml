@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 允许明文 HTTP 访问部署复刻版网页的服务器。
+     Android 9+ 默认禁止明文流量，没有这个配置 WebView 会报
+     net::ERR_CLEARTEXT_NOT_PERMITTED。
+     注意：这里故意不写具体域名/IP——仓库里不留服务器地址；
+     复刻版网页是自己部署的 HTTP 服务，base-config 对所有域名
+     放行明文即可（manifest 里 usesCleartextTraffic="true" 也是
+     同一作用）。如果你只想放行自己的服务器，改成 domain-config
+     并把 YOUR_SERVER_IP 换成你的服务器 IP。 -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
