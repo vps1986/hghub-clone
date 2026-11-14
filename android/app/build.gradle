@@ -10,14 +10,14 @@ android {
         applicationId = "com.hghub.huangguo"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1208
-        versionName = "1.2.0.8"
-        // 复刻版网页的部署地址，构建时注入，仓库里不写死服务器 IP。
-        //   ./gradlew assembleDebug -PappUrl=http://YOUR_SERVER_IP:8081/
-        // 不传则默认值为空，首次打开时在应用内输入一次（保存在本地）。
-        // Muse 托管的 fullstack artifact 没有公开链接，填入部署后的地址再构建。
-        buildConfigField("String", "APP_URL", "\"${project.findProperty("appUrl") ?: ""}\"")
-        buildConfigField("String", "FALLBACK_URL", "\"${project.findProperty("fallbackUrl") ?: ""}\"")
+        versionCode = 1209
+        versionName = "1.2.0.9"
+        // 三条入口线路（按优先级），构建时注入，可用 -Pline1/-Pline2/-Pline3 覆盖。
+        //   ./gradlew assembleDebug -Pline1=https://hg.45678.eu.org ...
+        // 冷启动从第一条开始，当前线路失败自动顺延下一条；三条都失败才转手动输入。
+        buildConfigField("String", "LINE1_URL", "\"${project.findProperty("line1") ?: "https://hg.45678.eu.org"}\"")
+        buildConfigField("String", "LINE2_URL", "\"${project.findProperty("line2") ?: "https://hg1.45678.eu.org"}\"")
+        buildConfigField("String", "LINE3_URL", "\"${project.findProperty("line3") ?: "https://sp1.45678.eu.org"}\"")
     }
 
     buildTypes {

@@ -44,29 +44,39 @@ import javax.net.ssl.SSLSocketFactory;
  * HGhub 复刻版 Android 壳：全屏竖屏 WebView。
  * 1.2.0.2：前端页面打进 APK 的 assets 里（assets/hghub/index.html +
  * hls.min.js），打开先加载本地页面（秒开、弱网也能看到界面），
- * 列表/播放再联网拉；相对路径以 APP_URL 为 base，API 仍走服务器。
+ * 列表/播放再联网拉；相对路径以当前线路为 base，API 仍走服务器。
  * 播放走直连 CDN（默认）或 8080 代理（备用）。
- * 1.2.0.8 优选 IP：APP_URL 默认就是构建时注入的域名（BuildConfig.APP_URL）；
- * 首屏先拉 cf.090227.xyz 的优选 IP（有缓存直接用缓存秒开、后台刷新，
- * 没缓存最多等约 3 秒），再加载本地页面，这样首屏 /api/* 就能走优选 IP；
- * 拦截时用优选 IP 连 443、SNI 写该域名（Cloudflare 证书校验正常），
- * 并转发 Cookie、禁 gzip（Accept-Encoding: identity），失败回退默认节点。
- * 优选域名取自 BuildConfig.APP_URL / FALLBACK_URL 的 host，不在代码里写死，
- * 换服务器只需构建时换环境变量。
+ * 1.2.0.8 优选 IP：首屏先拉 cf.090227.xyz 的优选 IP（有缓存直接用缓存秒开、
+ * 后台刷新，没缓存最多等约 3 秒），再加载本地页面，这样首屏 /api/* 就能
+ * 走优选 IP；拦截时用优选 IP 连 443、SNI 写该域名（Cloudflare 证书校验
+ * 正常），并转发 Cookie、禁 gzip（Accept-Encoding: identity），失败回退
+ * 默认节点。
+ * 1.2.0.9 三条线路：构建时注入 LINE1/LINE2/LINE3（按优先级排序），冷启动
+ * 永远从第一条线开始；当前线路主框架加载失败、或对它的请求返回 5xx 时，
+ * 自动切下一条线重新加载，不把切换结果存进本地（无粘性回退）；三条线都
+ * 失败才转到手动输入地址界面兜底。优选域名就是三条线路的 host，换服务器
+ * 只需构建时换环境变量。
  */
 public class MainActivity extends Activity {
 
     private static final String PREFS = "hghub";
-    private static final String KEY_URL = "app_url";
+    // 1.2.0.9：手动地址改存 app_url_v2。老版本的 app_url 里存的可能是主地址、
+    // 也可能是回退后写死的直连 IP，会盖住新版三条线路，首次运行就删掉（见
+    // migrateLegacyPrefs）。优选 IP 缓存 pref_ip / pref_isp 不受影响。
+    private static final String KEY_URL = "app_url_v2";
+    private static final String LEGACY_KEY_URL = "app_url";
 
     private WebView webView;
     // 1.2.0.5 优选 IP：cf.090227.xyz 上别人测好的 CF 优选 IP。
-    // WebView 打开 APP_URL/FALLBACK_URL 的域名时，用优选 IP 建连、SNI 仍写该域名，
+    // WebView 打开三条线路的域名时，用优选 IP 建连、SNI 仍写该域名，
     // 这样既走最快节点、证书校验也正常；拉不到就走 Cloudflare 默认节点。
     private volatile String prefIp = null;
     private volatile boolean prefIpEnabled = true;
-    private volatile boolean fellBack = false;
     private volatile String baseUrl = null;
+    // 1.2.0.9 线路状态（只在内存里，冷启动从第一条线重新开始）：
+    private volatile int lineIndex = 0;              // 当前用第几条线路（0 起）
+    private volatile boolean customUrl = false;      // 手动输入的地址不参与线路轮换
+    private volatile boolean linesExhausted = false; // 三条线都失败、已转手动界面
 
     /** 从 URL 取 host，解析失败返回 null。 */
     private static String hostOf(String url) {
@@ -74,10 +84,23 @@ public class MainActivity extends Activity {
         try { return new URL(url).getHost(); } catch (Exception e) { return null; }
     }
 
-    /** 是否为优选域名：构建时注入的 APP_URL / FALLBACK_URL 的 host。 */
+    /** 构建时注入的三条线路（按优先级排序），过滤掉空值。 */
+    private static String[] lineUrls() {
+        String[] raw = { BuildConfig.LINE1_URL, BuildConfig.LINE2_URL, BuildConfig.LINE3_URL };
+        List<String> out = new ArrayList<>();
+        for (String u : raw) {
+            if (u != null && !u.isEmpty()) out.add(u);
+        }
+        return out.toArray(new String[0]);
+    }
+
+    /** 是否为优选域名：三条线路中任意一条的 host。 */
     private static boolean isPrefHost(String host) {
         if (host == null || host.isEmpty()) return false;
-        return host.equals(hostOf(BuildConfig.APP_URL)) || host.equals(hostOf(BuildConfig.FALLBACK_URL));
+        for (String u : lineUrls()) {
+            if (host.equals(hostOf(u))) return true;
+        }
+        return false;
     }
     private FrameLayout fullscreenContainer;
     private View customView;
@@ -92,11 +115,25 @@ public class MainActivity extends Activity {
                 WindowManager.LayoutParams.FLAG_FULLSCREEN);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
+        migrateLegacyPrefs();
+
         String url = savedUrl();
         if (url == null || url.isEmpty()) {
             showUrlSetup();
         } else {
             showWebView(url);
+        }
+    }
+
+    /**
+     * 老版本把地址存在 app_url 里（主地址，或回退后写死的直连 IP），
+     * 它会盖住新版三条线路。首次运行新版时删掉这个老键；手动地址改用
+     * app_url_v2，优选 IP 缓存 pref_ip / pref_isp 与网页端设置都不动。
+     */
+    private void migrateLegacyPrefs() {
+        SharedPreferences p = getSharedPreferences(PREFS, MODE_PRIVATE);
+        if (p.contains(LEGACY_KEY_URL)) {
+            p.edit().remove(LEGACY_KEY_URL).apply();
         }
     }
 
@@ -106,9 +143,9 @@ public class MainActivity extends Activity {
         if (fromPrefs != null && !fromPrefs.isEmpty()) {
             return fromPrefs;
         }
-        // 构建时填入的地址优先于空值
-        String builtIn = BuildConfig.APP_URL;
-        return (builtIn == null || builtIn.isEmpty()) ? null : builtIn;
+        // 没存过手动地址：冷启动永远从第一条线路开始
+        String[] lines = lineUrls();
+        return lines.length > 0 ? lines[0] : null;
     }
 
     /** 首次打开：输入复刻版网页地址一次，保存在本地。 */
@@ -130,9 +167,9 @@ public class MainActivity extends Activity {
 
         EditText input = new EditText(this);
         input.setHint("https://…");
-        String builtIn = BuildConfig.APP_URL;
-        if (builtIn != null && !builtIn.isEmpty()) {
-            input.setText(builtIn);
+        String[] lines = lineUrls();
+        if (lines.length > 0) {
+            input.setText(lines[0]);
         }
         root.addView(input);
 
@@ -177,6 +214,17 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT));
         setContentView(root);
         baseUrl = url;
+        // 标记当前地址是第几条线路；不在三条线里就是手动地址，不参与轮换
+        String[] lines = lineUrls();
+        customUrl = true;
+        lineIndex = 0;
+        for (int i = 0; i < lines.length; i++) {
+            if (lines[i].equals(url)) {
+                lineIndex = i;
+                customUrl = false;
+                break;
+            }
+        }
         String cachedIp = getSharedPreferences(PREFS, MODE_PRIVATE).getString("pref_ip", null);
         if (cachedIp != null && !cachedIp.isEmpty()) {
             // 有缓存的优选 IP：直接用它秒开，后台再刷新
@@ -259,15 +307,18 @@ public class MainActivity extends Activity {
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, android.webkit.WebResourceError error) {
                 super.onReceivedError(view, request, error);
-                maybeFallback(view, request.getUrl() != null ? request.getUrl().toString() : "");
+                // 只看主框架的加载失败，子资源失败不触发切线
+                if (request != null && request.isForMainFrame()) {
+                    advanceLine(view, request.getUrl() != null ? request.getUrl().toString() : "");
+                }
             }
 
             @Override
             public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse errorResponse) {
                 super.onReceivedHttpError(view, request, errorResponse);
-                // 优选域名还没通（隧道未跑起来时会报 530）就回退到直连服务器地址
+                // 当前线路返回 5xx（如隧道未跑起来时的 530）就切下一条线
                 if (errorResponse != null && errorResponse.getStatusCode() >= 500) {
-                    maybeFallback(view, request.getUrl() != null ? request.getUrl().toString() : "");
+                    advanceLine(view, request.getUrl() != null ? request.getUrl().toString() : "");
                 }
             }
         });
@@ -304,18 +355,35 @@ public class MainActivity extends Activity {
         });
     }
 
-    /** 优选域名打不开（5xx/网络错）时，回退到构建时注入的直连地址（仅一次）。 */
-    private void maybeFallback(WebView view, String failedUrl) {
-        if (fellBack || failedUrl == null || !isPrefHost(hostOf(failedUrl))) return;
-        String fb = BuildConfig.FALLBACK_URL;
-        if (fb == null || fb.isEmpty()) return;
-        fellBack = true;
-        view.post(new Runnable() {
-            @Override public void run() {
-                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_URL, fb).apply();
-                loadBundledPage(fb);
-            }
-        });
+    /**
+     * 当前线路打不开（主框架加载失败，或对当前线路的请求返回 5xx）时切到
+     * 下一条线路重新加载。只按失败请求的 host 是不是当前线路来判断，子资源
+     * 偶发失败不会误切（HTTP 错误路径也只认当前线路的 host）。切换结果只存
+     * 在内存里、不写本地存储，冷启动永远从第一条线开始；三条线都失败才
+     * 转到手动输入地址界面兜底。手动地址模式不参与轮换。
+     */
+    private void advanceLine(WebView view, String failedUrl) {
+        if (customUrl || linesExhausted || failedUrl == null) return;
+        String[] lines = lineUrls();
+        if (lineIndex >= lines.length) return;
+        String failedHost = hostOf(failedUrl);
+        if (failedHost == null || !failedHost.equals(hostOf(lines[lineIndex]))) return;
+        if (lineIndex + 1 < lines.length) {
+            lineIndex++;
+            final String next = lines[lineIndex];
+            view.post(new Runnable() {
+                @Override public void run() {
+                    baseUrl = next;
+                    fetchPrefIpAsync(next, null); // 给新线路也预热优选 IP
+                    loadBundledPage(next);
+                }
+            });
+        } else {
+            linesExhausted = true;
+            view.post(new Runnable() {
+                @Override public void run() { showUrlSetup(); }
+            });
+        }
     }
 
     /** 后台拉 cf.090227.xyz 的优选 IP（别人测好的，不用自己测）。完成后（成功或失败）必调 onDone。 */
@@ -355,7 +423,7 @@ public class MainActivity extends Activity {
     }
 
     /**
-     * 优选 IP 拦截：只拦截优选域名（APP_URL/FALLBACK_URL 的 host）的 GET 请求。
+     * 优选 IP 拦截：只拦截优选域名（三条线路的 host）的 GET 请求。
      * 用优选 IP 连 443，TLS 的 SNI 写该域名（证书校验正常），
      * HTTP 请求头 Host 也写该域名。失败返回 null 走 WebView 默认加载。
      */
