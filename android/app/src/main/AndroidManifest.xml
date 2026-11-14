@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.hghub.huangguo"
-    android:versionCode="1208"
-    android:versionName="1.2.0.8">
+    android:versionCode="1209"
+    android:versionName="1.2.0.9">
 
     <!-- 联网是唯一需要的权限：加载复刻版网页、走服务端代理播 HLS -->
     <uses-permission android:name="android.permission.INTERNET" />
